@@ -11,20 +11,22 @@
 #include <stdlib.mqh>
 #include <stderror.mqh>
 
-extern int MACD_SMA = 9;
-extern int K_period = 14;
-extern int D_period = 3;
-extern double SL_Points = 800;
-extern double TP_Points = 100;
-extern int Period1 = 12;
-extern int Period2 = 26;
+extern int SMA5 = 5;
+extern int SMA20 = 20;
+extern double SL_Points = 1500;
+extern double TP_Points = 200;
 int LotDigits; //initialized in OnInit
 extern int MagicNumber = 1815671;
 int TOD_From_Hour = 10; //time of the day
 int TOD_From_Min = 00; //time of the day
 int TOD_To_Hour = 16; //time of the day
 int TOD_To_Min = 00; //time of the day
-double TradeSize = 1;
+double MM_Martingale_Start = 2.0;
+double MM_Martingale_ProfitFactor = 1;
+double MM_Martingale_LossFactor = 2;
+bool MM_Martingale_RestartProfit = true;
+bool MM_Martingale_RestartLoss = false;
+int MM_Martingale_RestartLosses = 1000;
 int MaxSlippage = 3; //adjusted in OnInit
 bool TradeMonday = true;
 bool TradeTuesday = true;
@@ -34,7 +36,7 @@ bool TradeFriday = true;
 bool TradeSaturday = false;
 bool TradeSunday = false;
 bool crossed[1]; //initialized to true, used in function Cross
-int MaxOpenTrades = 2;
+int MaxOpenTrades = 3;
 int MaxLongTrades = 1000;
 int MaxShortTrades = 1000;
 int MaxPendingOrders = 1000;
@@ -51,6 +53,30 @@ bool inTimeInterval(datetime t, int TOD_From_Hour, int TOD_From_Min, int TOD_To_
      || (StringCompare(TOD_From, TOD_To) > 0
        && ((StringCompare(TOD, TOD_From) >= 0 && StringCompare(TOD, "23:59") <= 0)
          || (StringCompare(TOD, "00:00") >= 0 && StringCompare(TOD, TOD_To) <= 0))));
+  }
+
+double MM_Size() //martingale / anti-martingale
+  {
+   double lots = MM_Martingale_Start;
+   double MaxLot = MarketInfo(Symbol(), MODE_MAXLOT);
+   double MinLot = MarketInfo(Symbol(), MODE_MINLOT);
+   if(SelectLastHistoryTrade())
+     {
+      double orderprofit = OrderProfit();
+      double orderlots = OrderLots();
+      double boprofit = BOProfit(OrderTicket());
+      if(orderprofit + boprofit > 0 && !MM_Martingale_RestartProfit)
+         lots = orderlots * MM_Martingale_ProfitFactor;
+      else if(orderprofit + boprofit < 0 && !MM_Martingale_RestartLoss)
+         lots = orderlots * MM_Martingale_LossFactor;
+      else if(orderprofit + boprofit == 0)
+         lots = orderlots;
+     }
+   if(ConsecutiveLosses(MM_Martingale_RestartLosses))
+      lots = MM_Martingale_Start;
+   if(lots > MaxLot) lots = MaxLot;
+   if(lots < MinLot) lots = MinLot;
+   return(lots);
   }
 
 bool TradeDayOfWeek()
@@ -99,6 +125,53 @@ int TradesCount(int type) //returns # of open trades for order type, current sym
       result++;
      }
    return(result);
+  }
+
+bool SelectLastHistoryTrade()
+  {
+   int lastOrder = -1;
+   int total = OrdersHistoryTotal();
+   for(int i = total-1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) continue;
+      if(OrderSymbol() == Symbol() && OrderMagicNumber() == MagicNumber)
+        {
+         lastOrder = i;
+         break;
+        }
+     } 
+   return(lastOrder >= 0);
+  }
+
+double BOProfit(int ticket) //Binary Options profit
+  {
+   int total = OrdersHistoryTotal();
+   for(int i = total-1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) continue;
+      if(StringSubstr(OrderComment(), 0, 2) == "BO" && StringFind(OrderComment(), "#"+ticket+" ") >= 0)
+         return OrderProfit();
+     }
+   return 0;
+  }
+
+bool ConsecutiveLosses(int n)
+  {
+   int count = 0;
+   int total = OrdersHistoryTotal();
+   for(int i = total-1; i >= 0; i--)
+     {
+      if(!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY)) continue;
+      if(OrderSymbol() == Symbol() && OrderMagicNumber() == MagicNumber)
+        {
+         double orderprofit = OrderProfit();
+         double boprofit = BOProfit(OrderTicket());
+         if(orderprofit + boprofit >= 0)
+            break;
+         count++;
+        }
+     }
+   return(count >= n);
   }
 
 int myOrderSend(int type, double price, double volume, string ordername) //send order, return ticket ("price" is irrelevant for market orders)
@@ -263,9 +336,9 @@ void OnTick()
    
    //Open Buy Order, instant signal is tested first
    if(Cross(0, iMACD(NULL, PERIOD_CURRENT, 12, 26, 9, PRICE_CLOSE, MODE_MAIN, 0) > iMACD(NULL, PERIOD_CURRENT, 12, 26, 9, PRICE_CLOSE, MODE_SIGNAL, 0)) //MACD crosses above MACD
-   && iRSI(NULL, PERIOD_CURRENT, 14, PRICE_CLOSE, 0) < 40 //Relative Strength Index < fixed value
-   && iMA(NULL, PERIOD_CURRENT, Period1, 0, MODE_EMA, PRICE_CLOSE, 0) > iMA(NULL, PERIOD_CURRENT, Period2, 0, MODE_SMA, PRICE_CLOSE, 0) //Moving Average > Moving Average
    && iMACD(NULL, PERIOD_CURRENT, 12, 26, 9, PRICE_CLOSE, MODE_MAIN, 0) < 0 //MACD < fixed value
+   && iRSI(NULL, PERIOD_CURRENT, 14, PRICE_CLOSE, 0) < 45 //Relative Strength Index < fixed value
+   && iMA(NULL, PERIOD_CURRENT, SMA5, 0, MODE_SMA, PRICE_CLOSE, 0) > iMA(NULL, PERIOD_CURRENT, SMA20, 0, MODE_SMA, PRICE_CLOSE, 0) //Moving Average > Moving Average
    )
      {
       RefreshRates();
@@ -276,7 +349,7 @@ void OnTick()
       if(!TradeDayOfWeek()) return; //open trades only on specific days of the week   
       if(IsTradeAllowed())
         {
-         ticket = myOrderSend(OP_BUY, price, TradeSize, "");
+         ticket = myOrderSend(OP_BUY, price, MM_Size(), "");
          if(ticket <= 0) return;
         }
       else //not autotrading => only send alert
